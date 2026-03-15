@@ -210,6 +210,9 @@
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
         import TWEEN from '@tweenjs/tween.js';
         import GUI from 'lil-gui';
 
@@ -315,17 +318,50 @@
             }
         `;
 
+        // 地球日夜混合 Shader（背面显示城市灯光效果，如 Solar-System-3D）
+        // 关键：vNormal 必须用 modelMatrix 转世界空间，与 vSunDirection 一致
+        const earthVertexShader = `
+            varying vec3 vNormal;
+            varying vec2 vUv;
+            varying vec3 vSunDirection;
+            uniform vec3 sunPosition;
+            void main() {
+                vUv = uv;
+                vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+                vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+                vSunDirection = normalize(sunPosition - worldPosition.xyz);
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `;
+        const earthFragmentShader = `
+            uniform sampler2D dayTexture;
+            uniform sampler2D nightTexture;
+            varying vec3 vNormal;
+            varying vec2 vUv;
+            varying vec3 vSunDirection;
+            void main() {
+                float intensity = max(dot(vNormal, vSunDirection), 0.0);
+                vec4 dayColor = texture2D(dayTexture, vUv);
+                vec4 nightRaw = texture2D(nightTexture, vUv);
+                // 参考 Solar-System-3D：保留城市灯光亮度，暗区用低系数，亮区（灯光）用高系数
+                float lum = max(max(nightRaw.r, nightRaw.g), nightRaw.b);
+                vec4 nightColor = vec4(nightRaw.rgb * (0.2 + 0.8 * lum), nightRaw.a);
+                gl_FragColor = mix(nightColor, dayColor, intensity);
+            }
+        `;
+
+        // 使用 Solar-System-3D (N3rson) 的高质量贴图，来源 Solar System Scope
         const planetDataList = [
-            { name: "太阳", size: 30, realRadius: 696000, distance: 0, orbitAU: 0, inclination: 0, rotation: 0.005, revolution: 0, fallbackColor: 0xffcc00, texture: './textures/th_sun/medres/th_sun.png', normalMap: null, data: { sunDistance: "0km", weight: "1.989e30kg", diameter: "1,392,000km", rotation: "25-35 days", revolution: "0", temp: "5500℃", msg: "太阳是太阳系的中心天体，占太阳系总体质量的99.86%。" } },
-            { name: "水星", size: 3.5, realRadius: 2439, distance: getDisplayOrbitDistance(0.39), orbitAU: 0.39, inclination: 7.0, rotation: 0.02, revolution: 0.047, fallbackColor: 0xaaaaaa, texture: './textures/Mercury/mercury.jpg', normalMap: './textures/Mercury/Mercury_NormalMap.png', data: { sunDistance: "58,000,000km", weight: "3.3e23kg", diameter: "4,879km", rotation: "58.6 days", revolution: "88 days", temp: "-173℃ to 427℃", msg: "水星是最小且最靠近太阳的行星。" } },
-            { name: "金星", size: 6.5, realRadius: 6051, distance: getDisplayOrbitDistance(0.72), orbitAU: 0.72, inclination: 3.4, rotation: 0.015, revolution: 0.035, fallbackColor: 0xffeebb, texture: './textures/Venus/Venus.jpg', normalMap: './textures/Venus/Venus_NormalMap.png', data: { sunDistance: "108,000,000km", weight: "4.87e24kg", diameter: "12,104km", rotation: "243 days", revolution: "225 days", temp: "462℃", msg: "金星是温度最高的行星，拥有浓厚大气层。" } },
-            { name: "地球", size: 7, realRadius: 6371, distance: getDisplayOrbitDistance(1.0), orbitAU: 1.0, inclination: 0.0, rotation: 0.02, revolution: 0.029, fallbackColor: 0x2233ff, texture: './textures/Earth/earth_daymap.jpg', normalMap: './textures/Earth/earth_normal_map.jpg', data: { sunDistance: "150,000,000km", weight: "5.97e24kg", diameter: "12,742km", rotation: "23.9 hours", revolution: "365.2 days", temp: "15℃", msg: "地球是我们赖以生存的家园。" } },
-            { name: "火星", size: 4.5, realRadius: 3389, distance: getDisplayOrbitDistance(1.52), orbitAU: 1.52, inclination: 1.85, rotation: 0.018, revolution: 0.024, fallbackColor: 0xff4400, texture: './textures/Mars/Mars.jpg', normalMap: './textures/Mars/Mars_NormalMap.png', data: { sunDistance: "228,000,000km", weight: "6.42e23kg", diameter: "6,779km", rotation: "24.6 hours", revolution: "687 days", temp: "-63℃", msg: "火星被称为红色星球。" } },
-            { name: "木星", size: 16, realRadius: 69911, distance: getDisplayOrbitDistance(5.2), orbitAU: 5.2, inclination: 1.3, rotation: 0.04, revolution: 0.013, fallbackColor: 0xffaa88, texture: './textures/Jupiter/Jupiter.jpg', normalMap: './textures/Jupiter/Jupiter_NormalMap.png', data: { sunDistance: "778,000,000km", weight: "1.9e27kg", diameter: "139,820km", rotation: "9.9 hours", revolution: "11.8 years", temp: "-108℃", msg: "木星是太阳系中最大的行星。" } },
-            { name: "土星", size: 14, realRadius: 58232, distance: getDisplayOrbitDistance(9.54), orbitAU: 9.54, inclination: 2.49, rotation: 0.038, revolution: 0.009, fallbackColor: 0xffddaa, texture: './textures/Saturn/Saturn.jpg', normalMap: './textures/Saturn/Saturn_NormalMap.png', ringMap: './textures/Saturn/saturn_ring_alpha.png', data: { sunDistance: "1,427,000,000km", weight: "5.68e26kg", diameter: "116,460km", rotation: "10.7 hours", revolution: "29.4 years", temp: "-138℃", msg: "土星以其壮丽的环系统而闻名。" } },
-            { name: "天王星", size: 10, realRadius: 25362, distance: getDisplayOrbitDistance(19.2), orbitAU: 19.2, inclination: 0.77, rotation: 0.03, revolution: 0.006, fallbackColor: 0xbbeeff, texture: './textures/Uranus/Uranus.jpg', normalMap: null, data: { sunDistance: "2,871,000,000km", weight: "8.68e25kg", diameter: "50,724km", rotation: "17.2 hours", revolution: "84 years", temp: "-195℃", msg: "天王星的自转轴几乎与轨道平行。" } },
-            { name: "海王星", size: 10, realRadius: 24622, distance: getDisplayOrbitDistance(30.06), orbitAU: 30.06, inclination: 1.77, rotation: 0.032, revolution: 0.005, fallbackColor: 0x6688ff, texture: './textures/Neptune/Neptune.jpg', normalMap: null, data: { sunDistance: "4,495,000,000km", weight: "1.02e26kg", diameter: "49,244km", rotation: "16.1 hours", revolution: "164.8 years", temp: "-201℃", msg: "海王星是风速最快的行星。" } },
-            { name: "冥王星", size: 2.5, realRadius: 1188, distance: getDisplayOrbitDistance(39.48), orbitAU: 39.48, inclination: 17.16, rotation: 0.01, revolution: 0.004, fallbackColor: 0xdddddd, texture: './textures/Pluto/pluto.jpg', normalMap: null, data: { sunDistance: "5,906,000,000km", weight: "1.3e22kg", diameter: "2,376km", rotation: "6.4 days", revolution: "248 years", temp: "-225℃", msg: "冥王星现被归类为矮行星。" } }
+            { name: "太阳", size: 30, realRadius: 696000, distance: 0, orbitAU: 0, inclination: 0, rotation: 0.005, revolution: 0, fallbackColor: 0xffcc00, texture: './textures/th_sun/medres/th_sun_s3d.jpg', normalMap: null, data: { sunDistance: "0km", weight: "1.989e30kg", diameter: "1,392,000km", rotation: "25-35 days", revolution: "0", temp: "5500℃", msg: "太阳是太阳系的中心天体，占太阳系总体质量的99.86%。" } },
+            { name: "水星", size: 3.5, realRadius: 2439, distance: getDisplayOrbitDistance(0.39), orbitAU: 0.39, inclination: 7.0, rotation: 0.02, revolution: 0.047, fallbackColor: 0xaaaaaa, texture: './textures/Mercury/mercurymap.jpg', bumpMap: './textures/Mercury/mercurybump.jpg', bumpScale: 0.7, data: { sunDistance: "58,000,000km", weight: "3.3e23kg", diameter: "4,879km", rotation: "58.6 days", revolution: "88 days", temp: "-173℃ to 427℃", msg: "水星是最小且最靠近太阳的行星。" } },
+            { name: "金星", size: 6.5, realRadius: 6051, distance: getDisplayOrbitDistance(0.72), orbitAU: 0.72, inclination: 3.4, rotation: 0.015, revolution: 0.035, fallbackColor: 0xffeebb, texture: './textures/Venus/venusmap.jpg', bumpMap: './textures/Venus/venusbump.jpg', bumpScale: 0.7, data: { sunDistance: "108,000,000km", weight: "4.87e24kg", diameter: "12,104km", rotation: "243 days", revolution: "225 days", temp: "462℃", msg: "金星是温度最高的行星，拥有浓厚大气层。" } },
+            { name: "地球", size: 7, realRadius: 6371, distance: getDisplayOrbitDistance(1.0), orbitAU: 1.0, inclination: 0.0, rotation: 0.02, revolution: 0.029, fallbackColor: 0x2233ff, texture: './textures/Earth/earth_daymap_s3d.jpg', nightTexture: './textures/Earth/earth_nightmap.jpg', normalMap: './textures/Earth/earth_normalmap.jpg', useDayNightShader: true, data: { sunDistance: "150,000,000km", weight: "5.97e24kg", diameter: "12,742km", rotation: "23.9 hours", revolution: "365.2 days", temp: "15℃", msg: "地球是我们赖以生存的家园。" } },
+            { name: "火星", size: 4.5, realRadius: 3389, distance: getDisplayOrbitDistance(1.52), orbitAU: 1.52, inclination: 1.85, rotation: 0.018, revolution: 0.024, fallbackColor: 0xff4400, texture: './textures/Mars/marsmap.jpg', bumpMap: './textures/Mars/marsbump.jpg', bumpScale: 0.95, data: { sunDistance: "228,000,000km", weight: "6.42e23kg", diameter: "6,779km", rotation: "24.6 hours", revolution: "687 days", temp: "-63℃", msg: "火星被称为红色星球。" } },
+            { name: "木星", size: 16, realRadius: 69911, distance: getDisplayOrbitDistance(5.2), orbitAU: 5.2, inclination: 1.3, rotation: 0.04, revolution: 0.013, fallbackColor: 0xffaa88, texture: './textures/Jupiter/jupiter_s3d.jpg', data: { sunDistance: "778,000,000km", weight: "1.9e27kg", diameter: "139,820km", rotation: "9.9 hours", revolution: "11.8 years", temp: "-108℃", msg: "木星是太阳系中最大的行星。" } },
+            { name: "土星", size: 14, realRadius: 58232, distance: getDisplayOrbitDistance(9.54), orbitAU: 9.54, inclination: 2.49, rotation: 0.038, revolution: 0.009, fallbackColor: 0xffddaa, texture: './textures/Saturn/saturnmap.jpg', ringMap: './textures/Saturn/saturn_ring_s3d.png', data: { sunDistance: "1,427,000,000km", weight: "5.68e26kg", diameter: "116,460km", rotation: "10.7 hours", revolution: "29.4 years", temp: "-138℃", msg: "土星以其壮丽的环系统而闻名。" } },
+            { name: "天王星", size: 10, realRadius: 25362, distance: getDisplayOrbitDistance(19.2), orbitAU: 19.2, inclination: 0.77, rotation: 0.03, revolution: 0.006, fallbackColor: 0xbbeeff, texture: './textures/Uranus/uranus_s3d.jpg', ringMap: './textures/Uranus/uranus_ring.png', data: { sunDistance: "2,871,000,000km", weight: "8.68e25kg", diameter: "50,724km", rotation: "17.2 hours", revolution: "84 years", temp: "-195℃", msg: "天王星的自转轴几乎与轨道平行。" } },
+            { name: "海王星", size: 10, realRadius: 24622, distance: getDisplayOrbitDistance(30.06), orbitAU: 30.06, inclination: 1.77, rotation: 0.032, revolution: 0.005, fallbackColor: 0x6688ff, texture: './textures/Neptune/neptune_s3d.jpg', data: { sunDistance: "4,495,000,000km", weight: "1.02e26kg", diameter: "49,244km", rotation: "16.1 hours", revolution: "164.8 years", temp: "-201℃", msg: "海王星是风速最快的行星。" } },
+            { name: "冥王星", size: 2.5, realRadius: 1188, distance: getDisplayOrbitDistance(39.48), orbitAU: 39.48, inclination: 17.16, rotation: 0.01, revolution: 0.004, fallbackColor: 0xdddddd, texture: './textures/Pluto/plutomap.jpg', bumpMap: './textures/Pluto/plutomap.jpg', bumpScale: 0.65, data: { sunDistance: "5,906,000,000km", weight: "1.3e22kg", diameter: "2,376km", rotation: "6.4 days", revolution: "248 years", temp: "-225℃", msg: "冥王星现被归类为矮行星。" } }
         ];
 
         // 2. 初始化环境
@@ -340,18 +376,28 @@
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         renderer.outputColorSpace = THREE.SRGBColorSpace;
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        renderer.toneMappingExposure = 1.2;
+        renderer.toneMappingExposure = 0.75;
         document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        // 参考 Solar-System-3D：Bloom 后处理使地球夜面城市灯光更明显
+        // 高 threshold 仅对极亮像素（城市灯光、太阳）生效，避免行星日照面过曝
+        const composer = new EffectComposer(renderer);
+        composer.addPass(new RenderPass(scene, camera));
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1, 0.35, 0.95);
+        bloomPass.threshold = 0.95;
+        bloomPass.strength = 0.35;
+        bloomPass.radius = 0.35;
+        composer.addPass(bloomPass);
 
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
         controls.maxDistance = 50000;
 
         const textureLoader = new THREE.TextureLoader();
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.25);
         scene.add(ambientLight);
 
-        const sunLight = new THREE.PointLight(0xffffff, 1000000, 10000, 2);
+        const sunLight = new THREE.PointLight(0xffffff, 450000, 10000, 2);
         sunLight.position.set(0, 0, 0);
         sunLight.castShadow = true;
         sunLight.shadow.mapSize.set(4096, 4096);
@@ -697,6 +743,21 @@
                     depthTest: true
                 });
                 material = sunShaderMaterial;
+            } else if (data.useDayNightShader && data.nightTexture) {
+                // 地球：日夜混合 Shader，背面显示城市灯光
+                const sunPosRef = new THREE.Vector3(0, 0, 0);
+                material = new THREE.ShaderMaterial({
+                    uniforms: {
+                        dayTexture: { value: null },
+                        nightTexture: { value: null },
+                        sunPosition: { value: sunPosRef }
+                    },
+                    vertexShader: earthVertexShader,
+                    fragmentShader: earthFragmentShader,
+                    transparent: false,
+                    depthWrite: true,
+                    depthTest: true
+                });
             } else {
                 material = new THREE.MeshStandardMaterial({ 
                     color: 0xffffff, roughness: 0.7, metalness: 0.2 
@@ -707,18 +768,28 @@
                 tex.colorSpace = THREE.SRGBColorSpace;
                 if (data.name === "太阳") {
                     material.uniforms.sunTexture.value = tex;
+                } else if (data.useDayNightShader) {
+                    material.uniforms.dayTexture.value = tex;
                 } else {
                     material.map = tex;
                 }
                 material.needsUpdate = true;
             }, undefined, (err) => {
                 console.warn(`Texture failed for ${data.name}, using base color.`);
-                if (data.name !== "太阳") {
+                if (data.name !== "太阳" && !data.useDayNightShader) {
                     material.color.setHex(data.fallbackColor);
                 }
             });
 
-            if (data.normalMap && data.name !== "太阳") {
+            if (data.nightTexture && data.useDayNightShader) {
+                textureLoader.load(data.nightTexture, (tex) => {
+                    tex.colorSpace = THREE.SRGBColorSpace;
+                    material.uniforms.nightTexture.value = tex;
+                    material.needsUpdate = true;
+                });
+            }
+
+            if (data.normalMap && data.name !== "太阳" && !data.useDayNightShader) {
                 textureLoader.load(data.normalMap, (tex) => {
                     material.normalMap = tex;
                     if (data.name === "地球") {
@@ -729,6 +800,13 @@
                     } else {
                         material.normalScale = new THREE.Vector2(1, 1);
                     }
+                    material.needsUpdate = true;
+                });
+            }
+            if (data.bumpMap && data.name !== "太阳") {
+                textureLoader.load(data.bumpMap, (tex) => {
+                    material.bumpMap = tex;
+                    material.bumpScale = data.bumpScale ?? 0.7;
                     material.needsUpdate = true;
                 });
             }
@@ -790,7 +868,7 @@
                     mesh.add(flare);
                 });
             } else if (data.name === "地球") {
-                const cloudMap = textureLoader.load('textures/Earth/earth_clouds.jpg');
+                const cloudMap = textureLoader.load('./textures/Earth/earth_atmosphere.jpg');
                 const clouds = new THREE.Mesh(
                     new THREE.SphereGeometry(data.size * 1.02, 64, 64),
                     new THREE.MeshLambertMaterial({ map: cloudMap, transparent: true, opacity: 0.5 })
@@ -798,13 +876,13 @@
                 mesh.add(clouds);
                 
                 const moon = new THREE.Mesh(new THREE.SphereGeometry(1.8, 32, 32), new THREE.MeshStandardMaterial({ color: 0xdddddd }));
-                textureLoader.load('textures/Moon/moon.png', (tex) => { 
+                textureLoader.load('./textures/Moon/moonmap.jpg', (tex) => { 
                     moon.material.map = tex; 
                     moon.material.needsUpdate = true; 
                 });
-                textureLoader.load('textures/Moon/moon_NormalMap.png', (tex) => {
-                    moon.material.normalMap = tex;
-                    moon.material.normalScale = new THREE.Vector2(1, 1);
+                textureLoader.load('./textures/Moon/moonbump.jpg', (tex) => {
+                    moon.material.bumpMap = tex;
+                    moon.material.bumpScale = 0.5;
                     moon.material.needsUpdate = true;
                 });
                 moon.userData = {
@@ -854,25 +932,25 @@
                 ring.rotation.x = Math.PI / 2 + saturnRingTiltRad;
                 ring.renderOrder = 2;
                 mesh.add(ring);
-            } else if (data.name === "天王星") {
-                // 天王星主环近似范围（约 1.58R ~ 2.02R），其轴倾角 97.77° 对应环面倾角约 82.23°
+            } else if (data.name === "天王星" && data.ringMap) {
+                // 参考土星环实现：RingGeometry + 天王星专用贴图。天王星环较暗、较窄（暗冰/岩石）
                 const uranusRingInnerScale = 1.58;
                 const uranusRingOuterScale = 2.02;
                 const uranusRingTiltRad = THREE.MathUtils.degToRad(180 - 97.77);
                 const ring = new THREE.Mesh(
                     new THREE.RingGeometry(data.size * uranusRingInnerScale, data.size * uranusRingOuterScale, 128),
                     new THREE.MeshStandardMaterial({ 
-                        color: 0x89a0b8,
+                        color: 0x3a4555,
                         side: THREE.DoubleSide,
                         transparent: true,
-                        opacity: 0.48,
-                        alphaTest: 0.05,
+                        opacity: 0.58,
+                        alphaTest: 0.06,
                         depthWrite: false
                     })
                 );
-                textureLoader.load('textures/Saturn/saturn_ring_alpha.png', (tex) => {
-                    ring.material.alphaMap = tex;
-                    ring.material.needsUpdate = true;
+                textureLoader.load(data.ringMap, (tex) => { 
+                    ring.material.alphaMap = tex; 
+                    ring.material.needsUpdate = true; 
                 });
                 ring.rotation.x = Math.PI / 2 + uranusRingTiltRad;
                 ring.renderOrder = 2;
@@ -1036,7 +1114,11 @@
             if (sunShaderMaterial) {
                 sunShaderMaterial.uniforms.time.value = elapsedTime;
             }
-            // haloShaderMaterial 不再使用 time uniform
+            // 更新地球日夜 Shader 的太阳位置（每帧同步，确保昼夜分界正确）
+            const earthMesh = planetMeshes[3];
+            if (earthMesh?.material?.uniforms?.sunPosition) {
+                planetMeshes[0].getWorldPosition(earthMesh.material.uniforms.sunPosition.value);
+            }
 
             if (!params.isPaused) {
                 const step = delta * params.speed;
@@ -1084,12 +1166,14 @@
                 
                 controls.target.copy(p);
             }
-            renderer.render(scene, camera);
+            composer.render();
         }
         animate();
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+            bloomPass.resolution.set(window.innerWidth, window.innerHeight);
         });
     </script>
 </body>
