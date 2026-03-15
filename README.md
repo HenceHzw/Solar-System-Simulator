@@ -2,6 +2,8 @@
 
 基于 Three.js 的太阳系运动仿真。
 
+**在线演示**：<https://hencehzw.github.io/Solar-System-Simulator/>
+
 ## 快速开始
 
 因 CORS 限制，需通过本地 HTTP 服务器运行：
