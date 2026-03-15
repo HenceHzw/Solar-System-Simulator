@@ -126,6 +126,17 @@
             background: rgba(124, 177, 255, 0.12); border-color: rgba(124, 177, 255, 0.3);
             box-shadow: inset 0 0 0 1px rgba(124, 177, 255, 0.08);
         }
+        .keyboard-help {
+            display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--panel-text-soft);
+        }
+        .keyboard-item {
+            display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+        }
+        .keyboard-item kbd {
+            padding: 3px 7px; border-radius: 6px; font-size: 11px; font-family: inherit;
+            background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.12);
+            color: #f4f8ff;
+        }
         .quick-target-main { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
         .quick-target-name { font-size: 14px; font-weight: 500; color: #f4f8ff; }
         .quick-target-type { font-size: 11px; color: var(--panel-text-soft); letter-spacing: 0.06em; text-transform: uppercase; }
@@ -201,6 +212,21 @@
                     <summary>展开星体列表</summary>
                     <div class="quick-collapse-body">
                         <div id="quick-target-list" class="quick-target-list"></div>
+                    </div>
+                </details>
+            </div>
+            <div class="dock-section">
+                <details class="quick-collapse">
+                    <summary>键盘快捷键</summary>
+                    <div class="quick-collapse-body">
+                        <div id="keyboard-help" class="keyboard-help">
+                            <div class="keyboard-item"><kbd>ESC</kbd> 返回全景</div>
+                            <div class="keyboard-item"><kbd>1</kbd> 展示比例</div>
+                            <div class="keyboard-item"><kbd>2</kbd> 真实比例</div>
+                            <div class="keyboard-item"><kbd>←</kbd><kbd>→</kbd> 调整速度</div>
+                            <div class="keyboard-item"><kbd>Space</kbd> 暂停 / 继续</div>
+                            <div class="keyboard-item"><kbd>S</kbd> 轨道显示开关</div>
+                        </div>
                     </div>
                 </details>
             </div>
@@ -1089,7 +1115,7 @@
         const params = { speed: 1.0, isPaused: false, displayMode: 'display', showOrbitTracks: true };
         const gui = new GUI({ title: '控制演示' });
         controlPanelBody.appendChild(gui.domElement);
-        gui.add(params, 'speed', 0, 5).name('动画倍速');
+        gui.add(params, 'speed', 0, 5).step(0.2).name('动画倍速');
         gui.add(params, 'isPaused').name('暂停动画');
         gui.add(params, 'showOrbitTracks').name('行星轨道').onChange((value) => {
             updateOrbitTracksVisibility(value);
@@ -1101,6 +1127,50 @@
             updateDisplayMode(value);
         });
         updateOrbitTracksVisibility(params.showOrbitTracks);
+
+        // 键盘控制
+        function syncGuiDisplay() {
+            const walk = (g) => {
+                if (g.controllers) g.controllers.forEach((c) => { c.updateDisplay && c.updateDisplay(); if (c.$folder) walk(c.$folder); });
+            };
+            walk(gui);
+        }
+        window.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            switch (e.code) {
+                case 'Escape':
+                    resetView();
+                    break;
+                case 'Digit1':
+                    params.displayMode = 'display';
+                    updateDisplayMode('display');
+                    syncGuiDisplay();
+                    break;
+                case 'Digit2':
+                    params.displayMode = 'realistic';
+                    updateDisplayMode('realistic');
+                    syncGuiDisplay();
+                    break;
+                case 'ArrowLeft':
+                    params.speed = Math.round(Math.max(0, params.speed - 0.2) * 10) / 10;
+                    syncGuiDisplay();
+                    break;
+                case 'ArrowRight':
+                    params.speed = Math.round(Math.min(5, params.speed + 0.2) * 10) / 10;
+                    syncGuiDisplay();
+                    break;
+                case 'Space':
+                    e.preventDefault();
+                    params.isPaused = !params.isPaused;
+                    syncGuiDisplay();
+                    break;
+                case 'KeyS':
+                    params.showOrbitTracks = !params.showOrbitTracks;
+                    updateOrbitTracksVisibility(params.showOrbitTracks);
+                    syncGuiDisplay();
+                    break;
+            }
+        });
 
         const clock = new THREE.Clock();
         function animate() {
