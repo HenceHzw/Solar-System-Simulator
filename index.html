@@ -13,8 +13,25 @@
             --panel-highlight: rgba(124, 177, 255, 0.95);
             --panel-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
         }
-        body { margin: 0; overflow: hidden; background-color: #000; color: #fff; font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
-        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        html, body {
+            margin: 0;
+            overflow: hidden;
+            overscroll-behavior: none;
+            background-color: #000;
+            color: #fff;
+            font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+            overscroll-behavior: none;
+            touch-action: none;
+        }
+        #canvas-container canvas {
+            display: block;
+            touch-action: none;
+        }
         #info-panel {
             position: absolute; top: 20px; left: 20px; width: 316px;
             background: var(--panel-bg);
@@ -392,7 +409,7 @@
 
         // 2. 初始化环境
         const scene = new THREE.Scene();
-        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 100000);
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 100000);
         camera.position.set(0, 1000, 2000);
 
         const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -403,7 +420,9 @@
         renderer.outputColorSpace = THREE.SRGBColorSpace;
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
         renderer.toneMappingExposure = 0.75;
-        document.getElementById('canvas-container').appendChild(renderer.domElement);
+        const canvasContainer = document.getElementById('canvas-container');
+        canvasContainer.appendChild(renderer.domElement);
+        renderer.domElement.style.touchAction = 'none';
 
         // 参考 Solar-System-3D：Bloom 后处理使地球夜面城市灯光更明显
         // 高 threshold 仅对极亮像素（城市灯光、太阳）生效，避免行星日照面过曝
@@ -415,9 +434,81 @@
         bloomPass.radius = 0.35;
         composer.addPass(bloomPass);
 
+        let isFocusing = false;
+        let activeTweens = [];
+        const CONTROL_LIMITS = {
+            display: { minDistance: 20, focusMinDistance: 42, focusDistanceScale: 6.5, focusHeightScale: 2.2 },
+            realistic: { minDistance: 0.08, focusMinDistance: 0.12, focusDistanceScale: 1.12, focusHeightScale: 0.35 }
+        };
+
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
+        controls.enableZoom = false;
+        controls.minDistance = CONTROL_LIMITS.display.minDistance;
         controls.maxDistance = 50000;
+        controls.zoomSpeed = 0.6;
+
+        function updateControlLimits(target = focusedPlanet) {
+            const limits = CONTROL_LIMITS[currentDisplayMode] || CONTROL_LIMITS.display;
+            let minDistance = limits.minDistance;
+
+            if (target) {
+                const targetSize = target.userData.size * target.scale.x;
+                const surfacePadding = currentDisplayMode === 'realistic' ? 1.005 : 1.05;
+                minDistance = Math.max(limits.minDistance, targetSize * surfacePadding);
+            }
+
+            controls.minDistance = minDistance;
+        }
+
+        function syncCameraWithFocusedPlanet() {
+            if (!focusedPlanet) return;
+
+            const targetPos = new THREE.Vector3();
+            focusedPlanet.getWorldPosition(targetPos);
+            const deltaPos = new THREE.Vector3().subVectors(targetPos, controls.target);
+            camera.position.add(deltaPos);
+            controls.target.copy(targetPos);
+        }
+
+        function cancelCameraTweens() {
+            const wasFocusing = isFocusing;
+            activeTweens.forEach(tween => tween.stop());
+            activeTweens = [];
+
+            if (wasFocusing) {
+                syncCameraWithFocusedPlanet();
+            }
+
+            isFocusing = false;
+        }
+
+        function applyWheelZoom(event) {
+            event.preventDefault();
+            cancelCameraTweens();
+
+            const direction = Math.sign(event.deltaY);
+            if (direction === 0) return;
+
+            const zoomFactor = direction > 0 ? 1.12 : 1 / 1.12;
+            const viewOffset = new THREE.Vector3().subVectors(camera.position, controls.target);
+            const currentDistance = viewOffset.length();
+            const nextDistance = THREE.MathUtils.clamp(
+                currentDistance * zoomFactor,
+                controls.minDistance,
+                controls.maxDistance
+            );
+
+            if (currentDistance === 0 || nextDistance === currentDistance) return;
+
+            viewOffset.setLength(nextDistance);
+            camera.position.copy(controls.target).add(viewOffset);
+            controls.update();
+        }
+
+        renderer.domElement.addEventListener('pointerdown', cancelCameraTweens);
+        renderer.domElement.addEventListener('wheel', applyWheelZoom, { passive: false });
+        updateControlLimits(null);
 
         const textureLoader = new THREE.TextureLoader();
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.25);
@@ -713,6 +804,8 @@
                 const z = b * Math.sin(asteroid.angle);
                 asteroid.mesh.position.set(x, asteroid.yOffset, z);
             });
+
+            updateControlLimits();
 
             if (focusedPlanet) {
                 focusOn(focusedPlanet);
@@ -1034,9 +1127,6 @@
             }
         });
 
-        let isFocusing = false;
-        let activeTweens = [];
-
         function focusOn(planet) {
             focusedPlanet = planet;
             const d = planet.userData;
@@ -1063,15 +1153,21 @@
             // 这里 actualSize 会用于计算相机的目标距离
             // 如果是在真实比例下，冥王星非常小，如果还乘以前面的固定系数可能会导致距离过近，被相机的 near 面 (1.0) 裁剪掉
             const actualSize = d.size * planet.scale.x;
-            
-            // 确保拉近相机时，最小不低于一个安全距离（比如 5），防止切入模型内部或触发 near clip
-            const camDistanceY = Math.max(actualSize * 2, 5);
-            const camDistanceZ = Math.max(actualSize * 5, 10);
+            updateControlLimits(planet);
+
+            // 真实比例下允许更近距离观察，但仍保留少量安全距离避免切入模型。
+            const modeLimits = CONTROL_LIMITS[currentDisplayMode] || CONTROL_LIMITS.display;
+            const minFocusDistance = Math.max(modeLimits.focusMinDistance, controls.minDistance * 1.02);
+            const camDistanceY = Math.max(actualSize * modeLimits.focusHeightScale, minFocusDistance * 0.2);
+            const camDistanceZ = Math.max(actualSize * modeLimits.focusDistanceScale, minFocusDistance);
 
             const tweenCam = new TWEEN.Tween(camera.position)
                 .to({ x: targetPos.x, y: targetPos.y + camDistanceY, z: targetPos.z + camDistanceZ }, 1500)
                 .easing(TWEEN.Easing.Cubic.InOut)
-                .onComplete(() => isFocusing = false)
+                .onComplete(() => {
+                    syncCameraWithFocusedPlanet();
+                    isFocusing = false;
+                })
                 .start();
             
             const tweenTarget = new TWEEN.Tween(controls.target)
@@ -1090,6 +1186,7 @@
 
             activeTweens.forEach(t => t.stop());
             activeTweens = [];
+            updateControlLimits(null);
 
             const tweenCam = new TWEEN.Tween(camera.position).to({ x: 0, y: 600, z: 1500 }, 1500).easing(TWEEN.Easing.Cubic.InOut).start();
             const tweenTarget = new TWEEN.Tween(controls.target).to({ x: 0, y: 0, z: 0 }, 1500).easing(TWEEN.Easing.Cubic.InOut).start();
@@ -1178,7 +1275,6 @@
             const delta = clock.getDelta();
             const elapsedTime = clock.getElapsedTime();
             TWEEN.update();
-            controls.update();
 
             // 更新太阳 Shader Uniforms
             if (sunShaderMaterial) {
@@ -1224,18 +1320,20 @@
                     asteroid.mesh.rotation.x += asteroid.rotationSpeed * 0.5 * step * 40;
                 });
             }
-            if (focusedPlanet) {
+
+            if (focusedPlanet && !isFocusing) {
                 const p = new THREE.Vector3();
                 focusedPlanet.getWorldPosition(p);
 
-                // 如果处于飞越动画完成后的追踪状态，则不仅让相机看向星球，同时也让相机随星球一起移动
-                if (!isFocusing && !params.isPaused) {
+                if (!params.isPaused) {
                     const deltaPos = new THREE.Vector3().subVectors(p, controls.target);
                     camera.position.add(deltaPos);
                 }
-                
+
                 controls.target.copy(p);
             }
+
+            controls.update();
             composer.render();
         }
         animate();
